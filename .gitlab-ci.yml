@@ -1,0 +1,107 @@
+image: docker:latest
+services:
+  - docker:dind
+
+stages:
+  - build
+  - docker
+  - deploy
+
+variables:
+  DOCKER_DRIVER: overlay
+
+.containerbuild: &containerbuild
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: ['']
+  variables:
+    TAG: '${CI_COMMIT_REF_NAME}'
+  script:
+    - |
+      if [[ "$CI_COMMIT_BRANCH" == "$CI_DEFAULT_BRANCH" ]]; then
+        tag=""
+        echo "Running on default branch '$CI_DEFAULT_BRANCH': tag='latest'"
+      else
+        tag="$CI_COMMIT_REF_SLUG"
+        echo "Running on branch '$CI_COMMIT_BRANCH': tag=$tag"
+      fi
+    - echo "{\"auths\":{\"$CI_REGISTRY\":{\"username\":\"$CI_REGISTRY_USER\",\"password\":\"$CI_REGISTRY_PASSWORD\"}}}" > /kaniko/.docker/config.json
+    - /kaniko/executor --context $CI_PROJECT_DIR --dockerfile $CI_PROJECT_DIR/Dockerfile --destination $CI_REGISTRY_IMAGE:${tag}
+
+build:container:dev:
+  <<: *containerbuild
+  only:
+    - develop
+  tags:
+    - mz-aio
+
+build:container:staging:
+  <<: *containerbuild
+  only:
+    - staging
+  tags:
+    - mz-aio
+
+build:container:prod:
+  <<: *containerbuild
+  only:
+    - master
+  tags:
+    - mz-aio
+
+deploy:container:dev:
+  when: manual
+  stage: deploy
+  before_script:
+    - 'which ssh-agent || ( apk add --update openssh git -q )'
+    - eval $(ssh-agent -s)
+    - printenv DEV_PRIVATE_KEY | ssh-add -
+    - mkdir -p ~/.ssh
+    - ls -l ~/.ssh
+    - '[[ -f /.dockerenv ]] && echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config'
+  script: 
+    - ssh $DEVELOP_USER@$DEVELOP_SERVER -t "docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY"
+    - ssh $DEVELOP_USER@$DEVELOP_SERVER -t 'if [ "$(docker ps -q -f name=develop-frontend)" ]; then docker rm -f develop-frontend && docker image prune -a -f; fi'
+    - ssh $DEVELOP_USER@$DEVELOP_SERVER -t "docker run --name develop-frontend -d -p 3000:3000 $CI_REGISTRY_IMAGE:develop"
+  only:
+    - develop
+  tags:
+    - mz-aio
+
+deploy:container:staging:
+  when: manual
+  stage: deploy
+  before_script:
+    - 'which ssh-agent || ( apk add --update openssh git -q )'
+    - eval $(ssh-agent -s)
+    - printenv STAGING_PRIVATE_KEY | ssh-add -
+    - mkdir -p ~/.ssh
+    - ls -l ~/.ssh
+    - '[[ -f /.dockerenv ]] && echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config'
+  script:
+    - ssh $STAGING_USER@$STAGING_SERVER -t "docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY"
+    - ssh $STAGING_USER@$STAGING_SERVER -t 'if [ "$(docker ps -q -f name=staging-frontend)" ]; then docker rm -f staging-frontend && docker image prune -a -f; fi'
+    - ssh $STAGING_USER@$STAGING_SERVER -t "docker run --name staging-frontend -d -p 3000:3000 --restart always $CI_REGISTRY_IMAGE:staging"
+  only:
+    - staging
+  tags:
+    - mz-aio
+
+deploy:container:prod:
+  when: manual
+  stage: deploy
+  before_script:
+    - 'which ssh-agent || ( apk add --update openssh git -q )'
+    - eval $(ssh-agent -s)
+    - printenv LIVE_PRIVATE_KEY | ssh-add -
+    - mkdir -p ~/.ssh
+    - ls -l ~/.ssh
+    - '[[ -f /.dockerenv ]] && echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config'
+  script:
+    - echo "This will deploy to prod/live"
+  only:
+    - master
+  tags:
+    - mz-aio
+  
